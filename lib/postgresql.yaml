@@ -1,0 +1,178 @@
+tosca_definitions_version: tosca_simple_yaml_1_3
+
+node_types:
+    postgresql.database:
+        derived_from: tosca.nodes.Root
+
+        properties:
+            database_name:
+                type: string
+
+            database_user:
+                type: string
+
+            database_password:
+                type: string
+
+            product_prefix:
+                type: string
+                default: aisco
+
+            ssh_user:
+                type: string
+                default: ubuntu
+
+            ssh_key_file:
+                type: string
+
+        attributes:
+            db_host:
+                type: string
+                default: localhost
+
+        capabilities:
+            database:
+                type: tosca.capabilities.Endpoint.Database
+
+        requirements:
+            - host:
+                  capability: tosca.capabilities.Compute
+                  relationship: tosca.relationships.HostedOn
+
+        interfaces:
+            Standard:
+                create:
+                    implementation:
+                        primary: Ansible
+                        operation_host: HOST
+                    inputs:
+                        playbook:
+                            q:
+                                - name: wait for ssh
+                                  wait_for_connection:
+                                    timeout: 300
+
+                                - name: Update apt cache
+                                  apt:
+                                      update_cache: yes
+                                      cache_valid_time: 3600
+                                  become: true
+
+                                - name: Install PostgreSQL
+                                  apt:
+                                      name:
+                                          - postgresql
+                                          - postgresql-contrib
+                                          - python3-psycopg2
+                                          - acl
+                                      state: present
+                                  become: true
+
+                                - name: Ensure PostgreSQL service is running
+                                  systemd:
+                                      name: postgresql
+                                      state: started
+                                      enabled: yes
+                                  become: true
+
+                                - name: Wait for PostgreSQL to be ready
+                                  wait_for:
+                                      port: 5432
+                                      delay: 5
+                                      timeout: 60
+
+                                - name: Find PostgreSQL version directory
+                                  shell: ls -1 /etc/postgresql/ | head -n 1
+                                  register: pg_version
+                                  become: true
+                                  changed_when: false
+
+                                - name: Configure PostgreSQL to listen on all addresses
+                                  lineinfile:
+                                      path: "/etc/postgresql/{{ pg_version.stdout }}/main/postgresql.conf"
+                                      regexp: '^#?listen_addresses'
+                                      line: "listen_addresses = '*'"
+                                  become: true
+                                  register: pg_config_listen
+
+                                - name: Configure PostgreSQL client authentication
+                                  lineinfile:
+                                      path: "/etc/postgresql/{{ pg_version.stdout }}/main/pg_hba.conf"
+                                      line: "host    all             all             0.0.0.0/0               md5"
+                                      insertafter: EOF
+                                  become: true
+                                  register: pg_config_hba
+
+                                - name: Restart PostgreSQL if configuration changed
+                                  systemd:
+                                      name: postgresql
+                                      state: restarted
+                                  become: true
+                                  when: pg_config_listen.changed or pg_config_hba.changed
+
+                                - name: Wait for PostgreSQL to be ready after restart
+                                  wait_for:
+                                      port: 5432
+                                      delay: 3
+                                      timeout: 60
+                                  when: pg_config_listen.changed or pg_config_hba.changed
+
+                                - name: Check if PostgreSQL user exists
+                                  shell: sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='{{ SELF.database_user }}'"
+                                  become: true
+                                  register: user_exists
+                                  changed_when: false
+
+                                - name: Update postgres user password
+                                  become: true
+                                  shell: sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '{{ SELF.database_password }}';"
+
+                                - name: Check if PostgreSQL database exists
+                                  shell: sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='{{ SELF.database_name }}'"
+                                  become: true
+                                  register: db_exists
+                                  changed_when: false
+
+                                - name: Create PostgreSQL database
+                                  shell: sudo -u postgres psql -c "CREATE DATABASE {{ SELF.database_name }} OWNER {{ SELF.database_user }} ENCODING 'UTF8';"
+                                  become: true
+                                  when: db_exists.stdout != '1'
+
+                                - name: Grant privileges to user
+                                  shell: sudo -u postgres psql -d {{ SELF.database_name }} -c "GRANT ALL PRIVILEGES ON DATABASE {{ SELF.database_name }} TO {{ SELF.database_user }};"
+                                  become: true
+
+                        playbookArgs:
+                            - --become
+                            - --key-file={{ SELF.ssh_key_file }}
+                            - --user={{ SELF.ssh_user }}
+                            - --ssh-common-args="-o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"
+
+                delete:
+                    implementation:
+                        primary: Ansible
+                        operation_host: HOST
+                    inputs:
+                        playbook:
+                            q:
+                                - name: wait for ssh
+                                  wait_for_connection:
+                                    timeout: 60
+
+                                - name: Drop PostgreSQL database using SQL
+                                  shell: |
+                                      sudo -u postgres psql -c "DROP DATABASE IF EXISTS {{ SELF.database_name }};"
+                                  become: true
+                                  ignore_errors: yes
+
+                                - name: Drop PostgreSQL user using SQL
+                                  shell: |
+                                      sudo -u postgres psql -c "DROP ROLE IF EXISTS {{ SELF.database_user }};"
+                                  become: true
+                                  ignore_errors: yes
+
+                        playbookArgs:
+                            - --become
+                            - --key-file={{ SELF.ssh_key_file }}
+                            - --user={{ SELF.ssh_user }}
+                            - --ssh-common-args="-o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"

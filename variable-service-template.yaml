@@ -1,0 +1,289 @@
+tosca_definitions_version: tosca_variability_1_0
+
+imports:
+    - repository: unfurl
+      file: tosca_plugins/artifacts.yaml
+    - lib/java_app.yaml
+    - lib/java_runtime.yaml
+    - lib/postgresql.yaml
+    - lib/aws_vm.yaml
+    - lib/gcp_vm.yaml
+
+topology_template:
+    variability:
+        inputs:
+            cloud_provider:
+                type: string
+                default: AWS
+
+            deployment_region:
+                type: string
+                default: us-east-1
+
+        presets:
+            aws_deployment:
+                inputs:
+                    cloud_provider: AWS
+                    deployment_region: us-east-1
+
+            gcp_deployment:
+                inputs:
+                    cloud_provider: GCP
+                    deployment_region: us-central1
+
+        expressions:
+            is_aws: {equal: [{variability_input: cloud_provider}, AWS]}
+            is_gcp: {equal: [{variability_input: cloud_provider}, GCP]}
+
+        options:
+            type_default_condition: true
+            property_default_condition: true
+            relation_default_condition: true
+
+    inputs:
+        product_name:
+            type: string
+            default: winvmj-product
+
+        instance_name:
+            type: string
+            default: winvmj-app
+        
+        db_password:
+            type: string
+            default: postgres
+
+        db_username:
+            type: string
+            default: postgres
+
+        db_name:
+            type: string
+            default: javaapp
+
+        product_prefix:
+            type: string
+            default: aisco
+
+        # AWS specific inputs
+        aws_access_key:
+            type: string
+            default: YOUR_AWS_ACCESS_KEY
+            conditions: {logic_expression: is_aws}
+
+        aws_secret_key:
+            type: string
+            default: YOUR_AWS_SECRET_KEY
+            conditions: {logic_expression: is_aws}
+
+        aws_session_token:
+            type: string
+            default: YOUR_AWS_SESSION_TOKEN
+            conditions: {logic_expression: is_aws}
+
+        aws_instance_type:
+            type: string
+            default: t2.micro
+            conditions: {logic_expression: is_aws}
+
+        aws_region:
+            type: string
+            default: us-east-1
+            conditions: {logic_expression: is_aws}
+
+        aws_ssh_key_name:
+            type: string
+            default: my-key-pair
+            conditions: {logic_expression: is_aws}
+
+        aws_ssh_key_file:
+            type: string
+            default: /home/user/.ssh/aws-key.pem
+            conditions: {logic_expression: is_aws}
+
+        # GCP specific inputs
+        gcp_service_account_file:
+            type: string
+            default: /home/user/gcp/credentials.json
+            conditions: {logic_expression: is_gcp}
+
+        gcp_project:
+            type: string
+            default: my-gcp-project
+            conditions: {logic_expression: is_gcp}
+
+        gcp_instance_type:
+            type: string
+            default: e2-micro
+            conditions: {logic_expression: is_gcp}
+
+        gcp_region:
+            type: string
+            default: us-central1
+            conditions: {logic_expression: is_gcp}
+
+        gcp_zone:
+            type: string
+            default: us-central1-a
+            conditions: {logic_expression: is_gcp}
+
+        gcp_ssh_user:
+            type: string
+            default: ubuntu
+            conditions: {logic_expression: is_gcp}
+
+        gcp_ssh_key_file:
+            type: string
+            default: /home/user/.ssh/gcp-key
+            conditions: {logic_expression: is_gcp}
+
+    node_templates:
+        java_application:
+            type: java.app
+            properties:
+                - application_name: {get_input: product_name}
+                - application_port: 8080
+
+                ###################################################
+                # Database Connection
+                ###################################################
+
+                - DB_HOST: {get_attribute: [postgresql_database, db_host]}
+                - DB_PORT: 5432
+                - DB_NAME: {get_input: db_name}
+                - DB_USERNAME: {get_input: db_username}
+                - DB_PASSWORD: {get_input: db_password}
+
+                ###################################################
+                # Product Configuration
+                ###################################################
+
+                - product_prefix: {get_input: product_prefix}
+
+                ###################################################
+                # Cloud Provider Configuration
+                ###################################################
+
+                - cloud_provider:
+                      conditions: {logic_expression: is_aws}
+                      value: AWS
+
+                - cloud_provider:
+                      conditions: {logic_expression: is_gcp}
+                      value: GCP
+
+                ###################################################
+                # AWS Configuration
+                ###################################################
+
+                - aws_ssh_user:
+                      conditions: {logic_expression: is_aws}
+                      value: ubuntu
+
+                - aws_ssh_key_file:
+                      conditions: {logic_expression: is_aws}
+                      value: {get_input: aws_ssh_key_file}
+
+                ###################################################
+                # GCP Configuration
+                ###################################################
+
+                - gcp_ssh_user:
+                      conditions: {logic_expression: is_gcp}
+                      value: {get_input: gcp_ssh_user}
+
+                - gcp_ssh_key_file:
+                      conditions: {logic_expression: is_gcp}
+                      value: {get_input: gcp_ssh_key_file}
+
+            requirements:
+                - host:
+                      node: java_runtime
+                      conditions: {logic_expression: is_aws}
+                - host:
+                      node: java_runtime
+                      conditions: {logic_expression: is_gcp}
+                - database:
+                      node: postgresql_database
+
+            artifacts:
+                - artifact:
+                      type: tosca.artifacts.File
+                      file: files/application.zip
+
+        java_runtime:
+            type: java.runtime
+            conditions: true
+            properties:
+                - ssh_user:
+                      conditions: {logic_expression: is_aws}
+                      value: ubuntu
+
+                - ssh_key_file:
+                      conditions: {logic_expression: is_aws}
+                      value: {get_input: aws_ssh_key_file}
+
+                - ssh_user:
+                      conditions: {logic_expression: is_gcp}
+                      value: {get_input: gcp_ssh_user}
+
+                - ssh_key_file:
+                      conditions: {logic_expression: is_gcp}
+                      value: {get_input: gcp_ssh_key_file}
+
+            requirements:
+                - host:
+                      node: aws_vm
+                      conditions: {logic_expression: is_aws}
+                - host:
+                      node: gcp_vm
+                      conditions: {logic_expression: is_gcp}
+
+        postgresql_database:
+            type: postgresql.database
+            conditions: true
+            properties:
+                - database_name: {get_input: db_name}
+                - database_user: {get_input: db_username}
+                - database_password: {get_input: db_password}
+                - product_prefix: {get_input: product_prefix}
+
+                - ssh_user:
+                      conditions: {logic_expression: is_aws}
+                      value: ubuntu
+
+                - ssh_key_file:
+                      conditions: {logic_expression: is_aws}
+                      value: {get_input: aws_ssh_key_file}
+
+                - ssh_user:
+                      conditions: {logic_expression: is_gcp}
+                      value: {get_input: gcp_ssh_user}
+
+                - ssh_key_file:
+                      conditions: {logic_expression: is_gcp}
+                      value: {get_input: gcp_ssh_key_file}
+
+            requirements:
+                - host:
+                      node: aws_vm
+                      conditions: {logic_expression: is_aws}
+                - host:
+                      node: gcp_vm
+                      conditions: {logic_expression: is_gcp}
+
+        aws_vm:
+            type: aws.vm
+            conditions: {logic_expression: is_aws}
+            properties:
+                instance_name: {get_input: instance_name}
+                instance_type: {get_input: aws_instance_type}
+                application_port: 8080
+
+        gcp_vm:
+            type: gcp.vm
+            conditions: {logic_expression: is_gcp}
+            properties:
+                instance_name: {get_input: instance_name}
+                machine_type: {get_input: gcp_instance_type}
+                application_port: 8080

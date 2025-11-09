@@ -1,0 +1,67 @@
+tosca_definitions_version: tosca_simple_yaml_1_3
+
+node_types:
+    java.runtime:
+        derived_from: tosca.nodes.SoftwareComponent
+
+        properties:
+            ssh_user:
+                type: string
+                default: ubuntu
+
+            ssh_key_file:
+                type: string
+
+            java_version:
+                type: string
+                default: '17'
+
+        attributes:
+            public_address:
+                type: string
+                default: {eval: '.::.requirements[.name=host]::.target::public_address'}
+
+            public_ip:
+                type: string
+                default: {eval: '.::.requirements[.name=host]::.target::public_ip'}
+
+        capabilities:
+            host:
+                type: tosca.capabilities.Compute
+
+        interfaces:
+            Standard:
+                create:
+                    implementation:
+                        primary: Ansible
+                        operation_host: HOST
+                    inputs:
+                        playbook:
+                            q:
+                                - name: wait for ssh
+                                  wait_for_connection:
+
+                                - name: Update apt cache
+                                  apt:
+                                      update_cache: yes
+                                  become: true
+
+                                - name: Install OpenJDK
+                                  apt:
+                                      name: openjdk-{{ SELF.java_version }}-jdk
+                                      state: present
+                                  become: true
+
+                                - name: Verify Java installation
+                                  command: java -version
+                                  register: java_version_output
+
+                                - name: Display Java version
+                                  debug:
+                                      var: java_version_output.stderr_lines
+
+                        playbookArgs:
+                            - --become
+                            - --key-file={{ SELF.ssh_key_file }}
+                            - --user={{ SELF.ssh_user }}
+                            - --ssh-common-args="-o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"

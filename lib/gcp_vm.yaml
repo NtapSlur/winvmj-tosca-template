@@ -1,0 +1,199 @@
+tosca_definitions_version: tosca_simple_yaml_1_3
+
+imports:
+    - repository: unfurl
+      file: tosca_plugins/artifacts.yaml
+
+node_types:
+    gcp.vm:
+        derived_from: unfurl.nodes.Installer.Terraform
+
+        properties:
+            instance_name:
+                type: string
+
+            machine_type:
+                type: string
+                default: e2-micro
+
+            application_port:
+                type: integer
+                default: 7776
+
+            gcp_service_account_file:
+                type: string
+                default: {get_input: gcp_service_account_file}
+
+            gcp_project:
+                type: string
+                default: {get_input: gcp_project}
+
+            gcp_region:
+                type: string
+                default: {get_input: gcp_region}
+
+            gcp_zone:
+                type: string
+                default: {get_input: gcp_zone}
+
+        attributes:
+            public_address:
+                type: string
+
+            public_ip:
+                type: string
+
+        capabilities:
+            host:
+                type: tosca.capabilities.Compute
+
+        interfaces:
+            Standard:
+                operations:
+                    configure:
+                    delete:
+            defaults:
+                outputs:
+                    public_ip: public_ip
+                    public_address: public_address
+                inputs:
+                    tfvars: |
+                        credentials = "{{ SELF.gcp_service_account_file }}"
+                        project = "{{ SELF.gcp_project }}"
+                        region = "{{ SELF.gcp_region }}"
+                        zone = "{{ SELF.gcp_zone }}"
+                        instance_name = "{{ SELF.instance_name }}"
+                        machine_type = "{{ SELF.machine_type }}"
+                        application_port = {{ SELF.application_port }}
+                    main: |
+                        terraform {
+                          required_version = ">= 0.14.0"
+                          required_providers {
+                            google = {
+                              source  = "hashicorp/google"
+                              version = "~> 5.0"
+                            }
+                          }
+                        }
+
+                        provider "google" {
+                          credentials = var.credentials
+                          project     = var.project
+                          region      = var.region
+                        }
+
+                        variable "credentials" {
+                          type = string
+                        }
+
+                        variable "project" {
+                          type = string
+                        }
+
+                        variable "region" {
+                          type = string
+                        }
+
+                        variable "zone" {
+                          type = string
+                        }
+
+                        variable "instance_name" {
+                          type = string
+                        }
+
+                        variable "machine_type" {
+                          type = string
+                        }
+
+                        variable "application_port" {
+                          type = number
+                        }
+
+                        # Enable Compute Engine API
+                        resource "google_project_service" "compute" {
+                          project            = var.project
+                          service            = "compute.googleapis.com"
+                          disable_on_destroy = false
+                        }
+
+                        # Firewall rule for SSH
+                        resource "google_compute_firewall" "ssh" {
+                          depends_on = [google_project_service.compute]
+                          name       = "${var.instance_name}-ssh"
+                          network    = "default"
+
+                          allow {
+                            protocol = "tcp"
+                            ports    = ["22"]
+                          }
+
+                          source_ranges = ["0.0.0.0/0"]
+                          target_tags   = ["${var.instance_name}"]
+                        }
+
+                        # Firewall rule for application port
+                        resource "google_compute_firewall" "app" {
+                          depends_on = [google_project_service.compute]
+                          name       = "${var.instance_name}-app"
+                          network    = "default"
+
+                          allow {
+                            protocol = "tcp"
+                            ports    = [tostring(var.application_port)]
+                          }
+
+                          source_ranges = ["0.0.0.0/0"]
+                          target_tags   = ["${var.instance_name}"]
+                        }
+
+                        # Firewall rule for PostgreSQL
+                        resource "google_compute_firewall" "postgres" {
+                          depends_on = [google_project_service.compute]
+                          name       = "${var.instance_name}-postgres"
+                          network    = "default"
+
+                          allow {
+                            protocol = "tcp"
+                            ports    = ["5432"]
+                          }
+
+                          source_ranges = ["0.0.0.0/0"]
+                          target_tags   = ["${var.instance_name}"]
+                        }
+
+                        # Compute Instance
+                        resource "google_compute_instance" "app_instance" {
+                          depends_on   = [google_project_service.compute]
+                          name         = var.instance_name
+                          machine_type = var.machine_type
+                          zone         = var.zone
+
+                          boot_disk {
+                            initialize_params {
+                              image = "ubuntu-os-cloud/ubuntu-2204-lts"
+                              size  = 20
+                            }
+                          }
+
+                          network_interface {
+                            network = "default"
+                            access_config {
+                              # Ephemeral public IP
+                            }
+                          }
+
+                          tags = ["${var.instance_name}"]
+
+                          metadata = {
+                            enable-oslogin = "FALSE"
+                          }
+                        }
+
+                        output "public_address" {
+                          value = google_compute_instance.app_instance.network_interface[0].access_config[0].nat_ip
+                        }
+
+                        output "public_ip" {
+                          value = google_compute_instance.app_instance.network_interface[0].access_config[0].nat_ip
+                        }

@@ -1,0 +1,15 @@
+instance_name: ""
+
+# Database Configuration
+db_password: ""
+db_username: ""
+db_name: ""
+
+# AWS Configuration
+aws_access_key: ""
+aws_secret_key: ""
+aws_session_token: ""
+aws_instance_type: ""
+aws_region: ""
+aws_ssh_key_name: ""
+aws_ssh_key_file: ""

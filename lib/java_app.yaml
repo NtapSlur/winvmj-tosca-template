@@ -1,0 +1,346 @@
+tosca_definitions_version: tosca_simple_yaml_1_3
+
+node_types:
+    java.app:
+        derived_from: tosca.nodes.SoftwareComponent
+
+        properties:
+            application_name:
+                type: string
+
+            application_port:
+                type: integer
+                default: 8080
+
+            DB_HOST:
+                type: string
+
+            DB_PORT:
+                type: integer
+                default: 5432
+
+            DB_NAME:
+                type: string
+
+            DB_USERNAME:
+                type: string
+
+            DB_PASSWORD:
+                type: string
+
+            artifact:
+                type: string
+                default: {eval: '.artifacts::artifact'}
+
+            cloud_provider:
+                type: string
+
+            aws_ssh_user:
+                type: string
+                required: false
+                default: ubuntu
+
+            aws_ssh_key_file:
+                type: string
+                required: false
+
+            gcp_ssh_user:
+                type: string
+                required: false
+                default: ubuntu
+
+            gcp_ssh_key_file:
+                type: string
+                required: false
+
+            application_directory:
+                type: string
+                default: {concat: ['/opt/', {get_property: [SELF, application_name]}]}
+
+            product_prefix:
+                type: string
+                default: aisco
+
+        requirements:
+            - database:
+                  capability: tosca.capabilities.Endpoint.Database
+                  relationship: tosca.relationships.ConnectsTo
+
+        interfaces:
+            Standard:
+                create:
+                    implementation:
+                        primary: Ansible
+                        operation_host: HOST
+                    inputs:
+                        playbook:
+                            q:
+                                - name: wait for ssh
+                                  wait_for_connection:
+                                    timeout: 300
+
+                                - name: Install required packages
+                                  apt:
+                                      name:
+                                          - unzip
+                                          - python3-psycopg2
+                                          - postgresql-client
+                                      state: present
+                                      update_cache: yes
+                                  become: true
+
+                                - name: Create application base directory
+                                  file:
+                                      path: '{{ SELF.application_directory }}'
+                                      state: directory
+                                      mode: '0755'
+                                  become: true
+
+                                - name: Create backend directory
+                                  file:
+                                      path: '{{ SELF.application_directory }}/backend'
+                                      state: directory
+                                      mode: '0755'
+                                  become: true
+
+                                - name: Copy ZIP file
+                                  copy:
+                                      src: "{{ 'project' | get_dir }}/ensemble/{{ SELF.artifact.attributes.file }}"
+                                      dest: '{{ SELF.application_directory }}/application.zip'
+                                      mode: '0644'
+                                  become: true
+
+                                - name: Extract ZIP file
+                                  become: true
+                                  unarchive:
+                                      src: '{{ SELF.application_directory }}/application.zip'
+                                      dest: '{{ SELF.application_directory }}/backend'
+                                      remote_src: yes
+
+                                - name: Find product directory (bankaccount.product.*)
+                                  find:
+                                      paths: '{{ SELF.application_directory }}/backend'
+                                      file_type: directory
+                                      patterns: '*.product.*'
+                                  register: product_dirs
+                                  become: true
+
+                                - name: Set product directory path
+                                  set_fact:
+                                      product_dir: "{{ product_dirs.files[0].path }}"
+                                      product_dir_name: "{{ product_dirs.files[0].path | basename }}"
+                                      backend_dir: "{{ product_dirs.files[0].path | dirname }}"
+                                  when: product_dirs.matched > 0
+
+                                - name: Fail if no product directory found
+                                  fail:
+                                      msg: "No product directory (*.product.*) found in the ZIP archive"
+                                  when: product_dirs.matched == 0
+
+                                - name: Find main application JAR (capital first letter pattern)
+                                  find:
+                                      paths: '{{ product_dir }}'
+                                      # patterns: 'HeroBank.jar'
+                                      patterns: '{{ SELF.application_name }}.jar'
+                                      recurse: no
+                                  register: main_jar_files
+                                  become: true
+
+                                - name: Set main JAR file path
+                                  set_fact:
+                                      jar_file_path: "{{ main_jar_files.files[0].path }}"
+                                  when: main_jar_files.matched > 0
+
+                                - name: Fail if no main JAR file found
+                                  fail:
+                                      msg: "No main JAR file found in {{ product_dir }}"
+                                  when: main_jar_files.matched == 0
+
+                                - name: Display found JAR file
+                                  debug:
+                                      msg: "Main JAR file: {{ jar_file_path }}"
+
+                                - name: Create environment config directory
+                                  file:
+                                      path: '/etc/default'
+                                      state: directory
+                                      mode: '0755'
+                                  become: true
+
+                                - name: Wait for database to be ready
+                                  wait_for:
+                                      host: "{{ SELF.DB_HOST }}"
+                                      port: "{{ SELF.DB_PORT }}"
+                                      state: started
+                                      delay: 5
+                                      timeout: 300
+
+                                - name: Create product database if not exists
+                                  shell: |
+                                      sudo -u postgres psql -c "SELECT 1 FROM pg_database WHERE datname='{{ SELF.DB_NAME }}'" | grep -q 1 || \
+                                      sudo -u postgres psql -c "CREATE DATABASE {{ SELF.DB_NAME }} OWNER {{ SELF.DB_USERNAME }} ENCODING 'UTF8';"
+                                  become: true
+                                  register: db_creation
+                                  changed_when: "'CREATE DATABASE' in db_creation.stdout"
+
+                                - name: Grant privileges to application user
+                                  shell: |
+                                      sudo -u postgres psql -d {{ SELF.DB_NAME }} -c "GRANT ALL PRIVILEGES ON DATABASE {{ SELF.DB_NAME }} TO {{ SELF.DB_USERNAME }};" || true
+                                      sudo -u postgres psql -d {{ SELF.DB_NAME }} -c "GRANT ALL ON SCHEMA public TO {{ SELF.DB_USERNAME }};" || true
+                                  become: true
+
+                                - name: Create environment config file
+                                  copy:
+                                      dest: '/etc/default/{{ SELF.application_name }}'
+                                      content: |
+                                          AMANAH_DB_URL="jdbc:postgresql://{{ SELF.DB_HOST }}:{{ SELF.DB_PORT }}/{{ SELF.DB_NAME }}"
+                                          AMANAH_DB_USERNAME="{{ SELF.DB_USERNAME }}"
+                                          AMANAH_DB_PASSWORD="{{ SELF.DB_PASSWORD }}"
+                                          AMANAH_HOST_BE="0.0.0.0"
+                                          AMANAH_PORT_BE={{ SELF.application_port }}
+                                      mode: '0644'
+                                  become: true
+
+                                - name: Create systemd service
+                                  copy:
+                                      dest: '/etc/systemd/system/{{ SELF.application_name }}-be.service'
+                                      content: |
+                                          [Unit]
+                                          Description={{ SELF.application_name }} Backend Service
+                                          Documentation=https://example.com
+                                          After=network.target postgresql.service
+
+                                          [Service]
+                                          Type=simple
+                                          User=root
+                                          WorkingDirectory={{ backend_dir }}
+                                          EnvironmentFile=/etc/default/{{ SELF.application_name }}
+                                          ExecStart=/usr/bin/java -cp {{ product_dir_name }} --module-path {{ product_dir_name }} -m {{ product_dir_name }}
+                                          Restart=on-failure
+                                          RestartSec=10
+
+                                          [Install]
+                                          WantedBy=multi-user.target
+                                      mode: '0644'
+                                  become: true
+
+                                - name: Reload systemd daemon
+                                  systemd:
+                                      daemon_reload: yes
+                                  become: true
+
+                                - name: Check if SQL directory exists in backend root
+                                  stat:
+                                      path: '{{ SELF.application_directory }}/backend/sql'
+                                  register: sql_dir_root
+                                  become: true
+
+                                - name: Check if SQL files exist in backend root
+                                  find:
+                                      paths: '{{ SELF.application_directory }}/backend/sql'
+                                      patterns: '*.sql'
+                                  register: sql_files_root
+                                  become: true
+                                  when: sql_dir_root.stat.exists
+
+                                # - name: Seed database with SQL files from backend root
+                                #   shell: |
+                                #       PGPASSWORD="{{ SELF.DB_PASSWORD }}" psql -h {{ SELF.DB_HOST }} -U {{ SELF.DB_USERNAME }} -d {{ SELF.DB_NAME }} -f {{ item.path }}
+                                #   loop: "{{ sql_files_root.files }}"
+                                #   when: sql_dir_root.stat.exists and sql_files_root.matched > 0
+                                #   become: true
+                                #   ignore_errors: yes
+
+                                - name: Check if SQL directory exists in product directory
+                                  stat:
+                                      path: '{{ product_dir }}/sql'
+                                  register: sql_dir_product
+                                  become: true
+
+                                - name: Check if SQL files exist in product directory
+                                  find:
+                                      paths: '{{ product_dir }}/sql'
+                                      patterns: '*.sql'
+                                  register: sql_files_product
+                                  become: true
+                                  when: sql_dir_product.stat.exists
+
+                                # - name: Seed database with SQL files from product directory
+                                #   shell: |
+                                #       PGPASSWORD="{{ SELF.DB_PASSWORD }}" psql -h {{ SELF.DB_HOST }} -U {{ SELF.DB_USERNAME }} -d {{ SELF.DB_NAME }} -f {{ item.path }}
+                                #   loop: "{{ sql_files_product.files }}"
+                                #   when: sql_dir_product.stat.exists and sql_files_product.matched > 0
+                                #   become: true
+                                #   ignore_errors: yes
+
+                                - name: Start and enable backend service
+                                  systemd:
+                                      name: '{{ SELF.application_name }}-be'
+                                      state: started
+                                      enabled: yes
+                                  become: true
+
+                        playbookArgs:
+                            - --become
+                            - --key-file={{ SELF.aws_ssh_key_file if SELF.cloud_provider == 'AWS' else SELF.gcp_ssh_key_file }}
+                            - --user={{ SELF.aws_ssh_user if SELF.cloud_provider == 'AWS' else SELF.gcp_ssh_user }}
+                            - --ssh-common-args="-o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"
+
+                delete:
+                    implementation:
+                        primary: Ansible
+                        operation_host: HOST
+                    inputs:
+                        playbook:
+                            q:
+                                - name: wait for ssh
+                                  wait_for_connection:
+                                    timeout: 60
+
+                                - name: Stop backend service
+                                  systemd:
+                                      name: '{{ SELF.application_name }}-be'
+                                      state: stopped
+                                  become: true
+                                  ignore_errors: yes
+
+                                - name: Disable backend service
+                                  systemd:
+                                      name: '{{ SELF.application_name }}-be'
+                                      enabled: no
+                                  become: true
+                                  ignore_errors: yes
+
+                                - name: Remove systemd service file
+                                  file:
+                                      path: '/etc/systemd/system/{{ SELF.application_name }}-be.service'
+                                      state: absent
+                                  become: true
+
+                                - name: Remove environment config file
+                                  file:
+                                      path: '/etc/default/{{ SELF.application_name }}'
+                                      state: absent
+                                  become: true
+
+                                - name: Reload systemd daemon
+                                  systemd:
+                                      daemon_reload: yes
+                                  become: true
+
+                                - name: Remove application directory
+                                  file:
+                                      path: '{{ SELF.application_directory }}'
+                                      state: absent
+                                  become: true
+
+                                - name: Drop database using postgres user
+                                  shell: |
+                                      sudo -u postgres psql -c "DROP DATABASE IF EXISTS {{ SELF.DB_NAME }};"
+                                  become: true
+                                  ignore_errors: yes
+
+                        playbookArgs:
+                            - --key-file={{ SELF.aws_ssh_key_file if SELF.cloud_provider == 'AWS' else SELF.gcp_ssh_key_file }}
+                            - --user={{ SELF.aws_ssh_user if SELF.cloud_provider == 'AWS' else SELF.gcp_ssh_user }}
+                            - --ssh-common-args="-o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"
