@@ -8,6 +8,7 @@ imports:
     - lib/postgresql.yaml
     - lib/aws_vm.yaml
     - lib/gcp_vm.yaml
+    - lib/nginx_frontend.yaml
 
 topology_template:
     variability:
@@ -138,11 +139,70 @@ topology_template:
             conditions: {logic_expression: is_gcp}
 
     node_templates:
+        nginx_frontend:
+            type: nginx.frontend
+            properties:
+                - application_name: {get_input: product_name}
+                - frontend_port: 80
+                - backend_port: 7776
+                - backend_host: localhost
+
+                ###################################################
+                # Cloud Provider Configuration
+                ###################################################
+
+                - cloud_provider:
+                      conditions: {logic_expression: is_aws}
+                      value: AWS
+
+                - cloud_provider:
+                      conditions: {logic_expression: is_gcp}
+                      value: GCP
+
+                ###################################################
+                # AWS Configuration
+                ###################################################
+
+                - aws_ssh_user:
+                      conditions: {logic_expression: is_aws}
+                      value: ubuntu
+
+                - aws_ssh_key_file:
+                      conditions: {logic_expression: is_aws}
+                      value: {get_input: aws_ssh_key_file}
+
+                ###################################################
+                # GCP Configuration
+                ###################################################
+
+                - gcp_ssh_user:
+                      conditions: {logic_expression: is_gcp}
+                      value: {get_input: gcp_ssh_user}
+
+                - gcp_ssh_key_file:
+                      conditions: {logic_expression: is_gcp}
+                      value: {get_input: gcp_ssh_key_file}
+
+            requirements:
+                - host:
+                      node: java_runtime
+                      conditions: {logic_expression: is_aws}
+                - host:
+                      node: java_runtime
+                      conditions: {logic_expression: is_gcp}
+                - backend:
+                      node: java_application
+
+            artifacts:
+                - frontend_artifact:
+                      type: tosca.artifacts.File
+                      file: files/frontend.zip
+
         java_application:
             type: java.app
             properties:
                 - application_name: {get_input: product_name}
-                - application_port: 8080
+                - application_port: 7776
 
                 ###################################################
                 # Database Connection
@@ -278,7 +338,7 @@ topology_template:
             properties:
                 instance_name: {get_input: instance_name}
                 instance_type: {get_input: aws_instance_type}
-                application_port: 8080
+                application_port: 7776
 
         gcp_vm:
             type: gcp.vm
@@ -286,4 +346,4 @@ topology_template:
             properties:
                 instance_name: {get_input: instance_name}
                 machine_type: {get_input: gcp_instance_type}
-                application_port: 8080
+                application_port: 7776
