@@ -1,0 +1,241 @@
+tosca_definitions_version: tosca_simple_yaml_1_3
+
+node_types:
+    nginx.frontend:
+        derived_from: tosca.nodes.SoftwareComponent
+
+        properties:
+            application_name:
+                type: string
+
+            frontend_port:
+                type: integer
+                default: 80
+
+            backend_port:
+                type: integer
+                default: 7776
+
+            backend_host:
+                type: string
+                default: localhost
+
+            frontend_artifact:
+                type: string
+                default: {eval: '.artifacts::frontend_artifact'}
+
+            cloud_provider:
+                type: string
+
+            aws_ssh_user:
+                type: string
+                required: false
+                default: ubuntu
+
+            aws_ssh_key_file:
+                type: string
+                required: false
+
+            gcp_ssh_user:
+                type: string
+                required: false
+                default: ubuntu
+
+            gcp_ssh_key_file:
+                type: string
+                required: false
+
+            application_directory:
+                type: string
+                default: {concat: ['/opt/', {get_property: [SELF, application_name]}]}
+
+        requirements:
+            - backend:
+                  capability: tosca.capabilities.Endpoint
+                  relationship: tosca.relationships.ConnectsTo
+
+        interfaces:
+            Standard:
+                create:
+                    implementation:
+                        primary: Ansible
+                        operation_host: HOST
+                    inputs:
+                        playbook:
+                            q:
+                                - name: wait for ssh
+                                  wait_for_connection:
+                                    timeout: 300
+
+                                - name: Install NGINX
+                                  apt:
+                                      name:
+                                          - nginx
+                                          - unzip
+                                      state: present
+                                      update_cache: yes
+                                  become: true
+
+                                - name: Create frontend directory
+                                  file:
+                                      path: '{{ SELF.application_directory }}/frontend'
+                                      state: directory
+                                      mode: '0755'
+                                  become: true
+
+                                - name: Copy frontend ZIP file
+                                  copy:
+                                      src: "{{ 'project' | get_dir }}/ensemble/{{ SELF.frontend_artifact.attributes.file }}"
+                                      dest: '{{ SELF.application_directory }}/frontend.zip'
+                                      mode: '0644'
+                                  become: true
+
+                                - name: Extract frontend ZIP file
+                                  become: true
+                                  unarchive:
+                                      src: '{{ SELF.application_directory }}/frontend.zip'
+                                      dest: '{{ SELF.application_directory }}/frontend'
+                                      remote_src: yes
+
+                                - name: Check if build directory exists (React build output)
+                                  stat:
+                                      path: '{{ SELF.application_directory }}/frontend/build'
+                                  register: build_dir
+                                  become: true
+
+                                - name: Remove default NGINX site
+                                  file:
+                                      path: /etc/nginx/sites-enabled/default
+                                      state: absent
+                                  become: true
+
+                                - name: Create NGINX configuration
+                                  copy:
+                                      dest: '/etc/nginx/sites-available/{{ SELF.application_name }}'
+                                      content: |
+                                          server {
+                                              listen {{ SELF.frontend_port }};
+                                              server_name _;
+
+                                              # Frontend root directory
+                                              root {{ SELF.application_directory }}/frontend;
+                                              index index.html index.htm;
+
+                                              # Serve frontend static files
+                                              location / {
+                                                  try_files $uri $uri/ /index.html;
+                                              }
+
+                                              # Proxy API requests to backend
+                                              location /call/ {
+                                                  proxy_pass http://{{ SELF.backend_host }}:{{ SELF.backend_port }}/;
+                                                  proxy_http_version 1.1;
+                                                  proxy_set_header Upgrade $http_upgrade;
+                                                  proxy_set_header Connection 'upgrade';
+                                                  proxy_set_header Host $host;
+                                                  proxy_set_header X-Real-IP $remote_addr;
+                                                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                                                  proxy_set_header X-Forwarded-Proto $scheme;
+                                                  proxy_cache_bypass $http_upgrade;
+                                              }
+
+                                              # Additional backend endpoint (adjust as needed)
+                                              location ~ ^/(auth|users|products|orders)/ {
+                                                  proxy_pass http://{{ SELF.backend_host }}:{{ SELF.backend_port }};
+                                                  proxy_http_version 1.1;
+                                                  proxy_set_header Upgrade $http_upgrade;
+                                                  proxy_set_header Connection 'upgrade';
+                                                  proxy_set_header Host $host;
+                                                  proxy_set_header X-Real-IP $remote_addr;
+                                                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                                                  proxy_set_header X-Forwarded-Proto $scheme;
+                                                  proxy_cache_bypass $http_upgrade;
+                                              }
+
+                                              # Enable gzip compression
+                                              gzip on;
+                                              gzip_vary on;
+                                              gzip_min_length 1024;
+                                              gzip_types text/plain text/css text/xml text/javascript application/x-javascript application/xml+rss application/json;
+
+                                              # Security headers
+                                              add_header X-Frame-Options "SAMEORIGIN" always;
+                                              add_header X-Content-Type-Options "nosniff" always;
+                                              add_header X-XSS-Protection "1; mode=block" always;
+                                          }
+                                      mode: '0644'
+                                  become: true
+
+                                - name: Enable NGINX site
+                                  file:
+                                      src: '/etc/nginx/sites-available/{{ SELF.application_name }}'
+                                      dest: '/etc/nginx/sites-enabled/{{ SELF.application_name }}'
+                                      state: link
+                                  become: true
+
+                                - name: Test NGINX configuration
+                                  command: nginx -t
+                                  become: true
+                                  register: nginx_test
+                                  changed_when: false
+
+                                - name: Reload NGINX
+                                  systemd:
+                                      name: nginx
+                                      state: reloaded
+                                  become: true
+                                  when: nginx_test.rc == 0
+
+                                - name: Enable NGINX service
+                                  systemd:
+                                      name: nginx
+                                      enabled: yes
+                                      state: started
+                                  become: true
+
+                        playbookArgs:
+                            - --become
+                            - --key-file={{ SELF.aws_ssh_key_file if SELF.cloud_provider == 'AWS' else SELF.gcp_ssh_key_file }}
+                            - --user={{ SELF.aws_ssh_user if SELF.cloud_provider == 'AWS' else SELF.gcp_ssh_user }}
+                            - --ssh-common-args="-o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"
+
+                delete:
+                    implementation:
+                        primary: Ansible
+                        operation_host: HOST
+                    inputs:
+                        playbook:
+                            q:
+                                - name: wait for ssh
+                                  wait_for_connection:
+                                    timeout: 60
+
+                                - name: Disable NGINX site
+                                  file:
+                                      path: '/etc/nginx/sites-enabled/{{ SELF.application_name }}'
+                                      state: absent
+                                  become: true
+
+                                - name: Remove NGINX configuration
+                                  file:
+                                      path: '/etc/nginx/sites-available/{{ SELF.application_name }}'
+                                      state: absent
+                                  become: true
+
+                                - name: Reload NGINX
+                                  systemd:
+                                      name: nginx
+                                      state: reloaded
+                                  become: true
+                                  ignore_errors: yes
+
+                                - name: Remove frontend directory
+                                  file:
+                                      path: '{{ SELF.application_directory }}/frontend'
+                                      state: absent
+                                  become: true
+
+                        playbookArgs:
+                            - --key-file={{ SELF.aws_ssh_key_file if SELF.cloud_provider == 'AWS' else SELF.gcp_ssh_key_file }}
+                            - --user={{ SELF.aws_ssh_user if SELF.cloud_provider == 'AWS' else SELF.gcp_ssh_user }}
+                            - --ssh-common-args="-o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"

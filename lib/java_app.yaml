@@ -10,7 +10,7 @@ node_types:
 
             application_port:
                 type: integer
-                default: 8080
+                default: 7776
 
             DB_HOST:
                 type: string
@@ -60,6 +60,14 @@ node_types:
             product_prefix:
                 type: string
                 default: aisco
+
+        capabilities:
+            endpoint:
+                type: tosca.capabilities.Endpoint
+                properties:
+                    protocol: http
+                    port: {get_property: [SELF, application_port]}
+                    url_path: /
 
         requirements:
             - database:
@@ -140,7 +148,6 @@ node_types:
                                 - name: Find main application JAR (capital first letter pattern)
                                   find:
                                       paths: '{{ product_dir }}'
-                                      # patterns: 'HeroBank.jar'
                                       patterns: '{{ SELF.application_name }}.jar'
                                       recurse: no
                                   register: main_jar_files
@@ -243,14 +250,6 @@ node_types:
                                   become: true
                                   when: sql_dir_root.stat.exists
 
-                                # - name: Seed database with SQL files from backend root
-                                #   shell: |
-                                #       PGPASSWORD="{{ SELF.DB_PASSWORD }}" psql -h {{ SELF.DB_HOST }} -U {{ SELF.DB_USERNAME }} -d {{ SELF.DB_NAME }} -f {{ item.path }}
-                                #   loop: "{{ sql_files_root.files }}"
-                                #   when: sql_dir_root.stat.exists and sql_files_root.matched > 0
-                                #   become: true
-                                #   ignore_errors: yes
-
                                 - name: Check if SQL directory exists in product directory
                                   stat:
                                       path: '{{ product_dir }}/sql'
@@ -264,14 +263,16 @@ node_types:
                                   register: sql_files_product
                                   become: true
                                   when: sql_dir_product.stat.exists
-
-                                # - name: Seed database with SQL files from product directory
-                                #   shell: |
-                                #       PGPASSWORD="{{ SELF.DB_PASSWORD }}" psql -h {{ SELF.DB_HOST }} -U {{ SELF.DB_USERNAME }} -d {{ SELF.DB_NAME }} -f {{ item.path }}
-                                #   loop: "{{ sql_files_product.files }}"
-                                #   when: sql_dir_product.stat.exists and sql_files_product.matched > 0
-                                #   become: true
-                                #   ignore_errors: yes
+                                
+                                - name: Import SQL schema files (CREATE TABLES)
+                                  shell: |
+                                      cd {{ product_dir }}
+                                      for sql_file in sql/*.sql; do
+                                          echo "Importing schema: $sql_file"
+                                          PGPASSWORD="{{ SELF.DB_PASSWORD }}" psql -a -h {{ SELF.DB_HOST }} -U {{ SELF.DB_USERNAME }} -d {{ SELF.DB_NAME }} -f "$sql_file"
+                                      done
+                                  become: true
+                                  when: sql_dir_product.stat.exists and sql_files_product.matched > 0
 
                                 - name: Start and enable backend service
                                   systemd:

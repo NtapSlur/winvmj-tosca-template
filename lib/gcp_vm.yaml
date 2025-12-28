@@ -132,6 +132,36 @@ node_types:
                           target_tags   = ["${var.instance_name}"]
                         }
 
+                        # Firewall rule for HTTP
+                        resource "google_compute_firewall" "http" {
+                          depends_on = [google_project_service.compute]
+                          name       = "${var.instance_name}-http"
+                          network    = "default"
+
+                          allow {
+                            protocol = "tcp"
+                            ports    = ["80"]
+                          }
+
+                          source_ranges = ["0.0.0.0/0"]
+                          target_tags   = ["${var.instance_name}"]
+                        }
+
+                        # Firewall rule for HTTP
+                        resource "google_compute_firewall" "https" {
+                          depends_on = [google_project_service.compute]
+                          name       = "${var.instance_name}-https"
+                          network    = "default"
+
+                          allow {
+                            protocol = "tcp"
+                            ports    = ["443"]
+                          }
+
+                          source_ranges = ["0.0.0.0/0"]
+                          target_tags   = ["${var.instance_name}"]
+                        }
+
                         # Firewall rule for application port
                         resource "google_compute_firewall" "app" {
                           depends_on = [google_project_service.compute]
